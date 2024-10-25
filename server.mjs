@@ -1,96 +1,142 @@
 import express from 'express';
-import cookieParser from 'cookie-parser';
 import jwt from 'jsonwebtoken';
-import path from 'path';
-import { fileURLToPath } from 'url';
+import cookieParser from 'cookie-parser';
+import sqlite3 from 'sqlite3';
+import { open } from 'sqlite';
 
 const app = express();
+const PORT = 3000;
+const JWT_SECRET = 'your_secret_key'; // Change this to a strong secret
+const COOKIE_NAME = 'token';
+const COOKIE_MAX_AGE = 15 * 60 * 1000; // 15 minutes
+
+app.use(express.json());
 app.use(cookieParser());
+app.use(express.static('public')); // Serve static files from the "public" directory
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
-app.use(express.static(path.join(__dirname, 'public')));
+// Initialize SQLite database
+const dbPromise = open({
+    filename: './database.sqlite',
+    driver: sqlite3.Database
+});
 
-const JWT_SECRET = 'your_jwt_secret';
-const BASIC_TOKEN_LIFETIME = '2m'; // Short-lived (2 minutes)
-const REFRESH_TOKEN_LIFETIME = '30m'; // Long-lived (30 minutes)
+// Create the user_tokens table if it doesn't exist
+const initializeDatabase = async () => {
+    const db = await dbPromise;
+    await db.exec(`
+        CREATE TABLE IF NOT EXISTS user_tokens (
+            userId TEXT PRIMARY KEY,
+            token TEXT NOT NULL
+        )
+    `);
+};
 
-// Generate a JWT token with userId
-function generateToken(userId, expiresIn) {
-  return jwt.sign({ userId }, JWT_SECRET, { expiresIn });
-}
+// Middleware to check and refresh the token
+const checkAndRefreshToken = async (req, res, next) => {
+    const tokenCookie = req.cookies[COOKIE_NAME];
 
-// Middleware to validate the basic token and refresh if needed
-const validateBasicToken = (req, res, next) => {
-  const basicToken = req.cookies.basicToken;
-  const refreshToken = req.cookies.refreshToken;
+    if (tokenCookie) {
+        try {
+            const payload = jwt.verify(tokenCookie, JWT_SECRET);
+            const db = await dbPromise;
+            const storedToken = await getTokenFromDB(db, payload.userId);
 
-  if (basicToken) {
-    try {
-      // Verify the basicToken JWT
-      jwt.verify(basicToken, JWT_SECRET);
-      return next();
-    } catch (err) {
-      console.log('Basic token expired.');
+            if (storedToken && storedToken.token === tokenCookie) {
+                await refreshTokenIfNeeded(db, payload.userId, tokenCookie, res);
+            } else {
+                throw new Error('Token mismatch');
+            }
+        } catch (err) {
+            console.error('Token verification failed:', err.message);
+            res.clearCookie(COOKIE_NAME); // Clear cookie if verification fails
+        }
     }
-  }
 
-  if (refreshToken) {
-    try {
-      // Verify the refreshToken and issue a new basicToken if valid
-      const decoded = jwt.verify(refreshToken, JWT_SECRET);
-      const newBasicToken = generateToken(decoded.userId, BASIC_TOKEN_LIFETIME);
-      res.cookie('basicToken', newBasicToken, {
+    next();
+};
+
+// Login endpoint to generate the token
+app.post('/login', async (req, res) => {
+    const { userId } = req.body;
+
+    if (!userId) {
+        return res.status(400).json({ message: 'User ID is required' });
+    }
+
+    const token = await generateAndStoreToken(userId);
+    
+    // Set the token as a secure HttpOnly cookie
+    res.cookie(COOKIE_NAME, token, {
         httpOnly: true,
         secure: true,
         sameSite: 'Strict',
-        maxAge: 2 * 60 * 1000, // 2 minutes in milliseconds
-      });
-      console.log('Basic token refreshed.');
-      return next();
-    } catch (err) {
-      console.log('Refresh token expired.');
-      return res.status(401).send('Access Denied: Tokens expired');
+        maxAge: COOKIE_MAX_AGE
+    });
+
+    return res.json({ message: 'Login successful, token issued!' });
+});
+
+// Secure API endpoint that checks and validates the token
+app.get('/secure-access', async (req, res) => {
+    const tokenCookie = req.cookies[COOKIE_NAME];
+
+    if (!tokenCookie) {
+        return res.status(401).json({ message: 'Unauthorized, no token provided' });
     }
-  } else {
-    return res.status(401).send('Access Denied: No valid tokens');
-  }
+
+    try {
+        const payload = jwt.verify(tokenCookie, JWT_SECRET);
+
+        const db = await dbPromise;
+        const storedToken = await getTokenFromDB(db, payload.userId);
+
+        if (storedToken && storedToken.token === tokenCookie) {
+            return res.json({ message: `Access granted, token is valid and the user is ${payload.userId}`  });
+        } else {
+            throw new Error('Token mismatch');
+        }
+    } catch (err) {
+        return res.status(401).json({ message: 'Unauthorized, invalid token' });
+    }
+});
+
+// Start the server and initialize the database
+initializeDatabase().then(() => {
+    app.use(checkAndRefreshToken); // Apply the middleware
+    app.listen(PORT, () => {
+        console.log(`Server running on http://localhost:${PORT}`);
+    });
+});
+
+// Function to get the token from the database
+const getTokenFromDB = async (db, userId) => {
+    return await db.get('SELECT token FROM user_tokens WHERE userId = ?', userId);
 };
 
-// Set initial tokens (both basic and refresh tokens)
-app.get('/set-tokens', (req, res) => {
-  const userId = req.query.userId;
-  if (!userId) {
-    return res.status(400).send('User ID is required');
-  }
+// Function to refresh the token if needed
+const refreshTokenIfNeeded = async (db, userId, tokenCookie, res) => {
+    const tokenExpiration = (jwt.decode(tokenCookie)).exp * 1000; // Convert to milliseconds
+    const currentTime = Date.now();
+    const timeLeft = tokenExpiration - currentTime;
 
-  const basicToken = generateToken(userId, BASIC_TOKEN_LIFETIME);
-  const refreshToken = generateToken(userId, REFRESH_TOKEN_LIFETIME);
+    if (timeLeft < 5 * 60 * 1000) { // 5 minutes threshold
+        const newToken = jwt.sign({ userId }, JWT_SECRET, { expiresIn: '15m' });
+        await db.run('UPDATE user_tokens SET token = ? WHERE userId = ?', [newToken, userId]);
 
-  res.cookie('basicToken', basicToken, {
-    httpOnly: true,
-    secure: true,
-    sameSite: 'Strict',
-    maxAge: 2 * 60 * 1000, // 2 minutes in milliseconds
-  });
+        // Set the new token as a secure HttpOnly cookie
+        res.cookie(COOKIE_NAME, newToken, {
+            httpOnly: true,
+            secure: true,
+            sameSite: 'Strict',
+            maxAge: COOKIE_MAX_AGE
+        });
+    }
+};
 
-  res.cookie('refreshToken', refreshToken, {
-    httpOnly: true,
-    secure: true,
-    sameSite: 'Strict',
-    maxAge: 30 * 60 * 1000, // 30 minutes in milliseconds
-  });
-
-  res.send('Tokens set');
-});
-
-// Protected endpoint that requires a valid basicToken
-app.get('/protected-endpoint', validateBasicToken, (req, res) => {
-  res.json({ message: 'Protected data accessed' });
-});
-
-// Start the Express server
-const PORT = 3000;
-app.listen(PORT, () => {
-  console.log(`Express server running at http://localhost:${PORT}`);
-});
+// Function to generate a new token and store it in the database
+const generateAndStoreToken = async (userId) => {
+    const token = jwt.sign({ userId }, JWT_SECRET, { expiresIn: '15m' });
+    const db = await dbPromise;
+    await db.run('INSERT OR REPLACE INTO user_tokens (userId, token) VALUES (?, ?)', [userId, token]);
+    return token;
+};
