@@ -1,0 +1,30 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>JWT Token Example with Express</title>
+</head>
+<body>
+  <h1>Set and Refresh JWT Tokens with Express</h1>
+  <input type="text" id="userId" placeholder="Enter User ID" />
+  <button onclick="setTokens()">Set Tokens</button>
+  <button onclick="accessProtected()">Access Protected Endpoint</button>
+
+  <script>
+    function setTokens() {
+      const userId = document.getElementById('userId').value;
+      fetch(`/set-tokens?userId=${userId}`)
+        .then(response => response.ok ? alert('Tokens set!') : alert('Failed to set tokens'))
+        .catch(console.error);
+    }
+
+    function accessProtected() {
+      fetch('/protected-endpoint')
+        .then(response => response.json())
+        .then(data => alert(data.message))
+        .catch(console.error);
+    }
+  </script>
+</body>
+</html>
