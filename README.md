@@ -1,3 +1,20 @@
+### How to setup and run
+
+#### Generate a private / public pair of keys with
+
+```
+openssl genpkey -algorithm RSA -out private.pem -pkeyopt rsa_keygen_bits:2048
+openssl rsa -pubout -in private.pem -out public.pem
+```
+
+#### Run the server
+
+```
+npm run start
+```
+
+#### Open your web browser in http://localhost:3000/
+
 ### Key Points of the Cookie Flow
 
 - **Cookie Storage**: When a user logs in, a token is generated that includes the user's identification. This token is stored in a secure cookie in the user's browser.
